@@ -1,0 +1,148 @@
+- name: Create the Monitoring Namespace
+  k8s:
+    kind: Namespace
+    api_version: v1
+    name: monitoring
+    state: present
+
+- name: Create the Persistent Volume Claim
+  k8s: 
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: grafana-pvc
+        namespace: monitoring
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: "{{ grafana_volume_size }}"
+        storageClassName: "local-storage"
+    state: present
+
+- name: Create the Deployment
+  k8s: 
+    definition: 
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        labels:
+          app: grafana
+        name: grafana
+        namespace: monitoring
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: grafana
+        template:
+          metadata:
+            labels:
+              app: grafana
+          spec:
+            securityContext:
+              fsGroup: 472
+              supplementalGroups:
+                - 0
+            containers:
+              - name: grafana
+                image: grafana/grafana:7.5.2
+                imagePullPolicy: Always
+                ports:
+                  - name: http-grafana
+                    containerPort: 3000
+                    protocol: TCP
+                readinessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /robots.txt
+                    port: 3000
+                    scheme: HTTP
+                  initialDelaySeconds: 10
+                  periodSeconds: 30
+                  successThreshold: 1
+                  timeoutSeconds: 2
+                livenessProbe:
+                  failureThreshold: 3
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                  successThreshold: 1
+                  tcpSocket:
+                    port: 3000
+                  timeoutSeconds: 1
+                resources:
+                  requests:
+                    cpu: 250m
+                    memory: 750Mi
+                volumeMounts:
+                  - name: grafana-pv
+                    mountPath: /var/lib/grafana
+                  - name: grafana-datasources
+                    mountPath: /etc/grafana/provisioning/datasources
+                    readOnly: true
+                  - name: grafana-dashboards
+                    mountPath: /etc/grafana/provisioning/dashboards
+                    readOnly: true
+            volumes:
+              - name: grafana-pv
+                persistentVolumeClaim:
+                  claimName: grafana-pvc
+              - name: grafana-datasources
+                hostPath:
+                  path: "/{{ k8s_master_admin_user }}/grafana/datasources"
+                  type: Directory
+              - name: grafana-dashboards
+                hostPath:
+                  path: "/{{ k8s_master_admin_user }}/grafana/dashboards"
+                  type: Directory
+    state: present
+
+- name: Create the Persistent Volume
+  k8s:
+    definition: 
+      kind: PersistentVolume
+      apiVersion: v1
+      metadata:
+        name: pv-grafana
+        namespace: monitoring
+      spec:
+        capacity:
+          storage: "{{ grafana_volume_size }}"
+        storageClassName: local-storage
+        accessModes:
+          - ReadWriteOnce
+        claimRef:
+          namespace: monitoring
+          name: grafana-pvc
+        local:
+          path: "{{ grafana_mount_path }}"
+        nodeAffinity:
+          required:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - "{{ worker_prefix }}1" 
+    state: present
+
+- name: Create the Service 
+  k8s: 
+    definition: 
+      kind: Service
+      apiVersion: v1
+      metadata:
+        name: grafana-service
+        namespace: monitoring
+      spec:
+        selector:
+          app: grafana
+        ports:
+        - name: grafanaui
+          nodePort: "{{ grafana_port }}"
+          protocol: TCP
+          port: 3000
+        type: NodePort
+    state: present

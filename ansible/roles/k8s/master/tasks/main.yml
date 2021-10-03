@@ -1,0 +1,74 @@
+- name: Check if K8S Master initialization has been completed # Kind of... 
+  command: kubectl cluster-info
+  register: k8s_master_init
+  ignore_errors: yes
+
+- name: K8S Master initialization
+  when: k8s_master_init.stderr.find('did you specify the right host or port') != -1 # If K8S Master initialization has NOT been completed
+  block: 
+    - name: Configure kubectl
+      command: | 
+        kubeadm init --apiserver-advertise-address="{{ k8s_master_apiserver_advertise_address }}" 
+        --apiserver-cert-extra-sans="{{ k8s_master_apiserver_advertise_address }}" --node-name="{{ k8s_master_node_name }}" 
+        --pod-network-cidr="{{ k8s_master_pod_network_cidr }}"
+      args: 
+        creates: /etc/kubernetes/manifests/kube-apiserver.yaml
+
+    - name: Create .kube dir for {{ k8s_master_admin_user }} user
+      file:
+          path: "/home/{{ k8s_master_admin_user }}/.kube"
+          state: directory
+
+    - name: Copy kube config to {{ k8s_master_admin_user }} home .kube dir 
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest:  /home/{{ k8s_master_admin_user }}/.kube/config
+        remote_src: yes
+        owner: "{{ k8s_master_admin_user }}"
+        group: "{{ k8s_master_admin_group }}"
+        mode: 0660
+
+    - name: Create .kube dir for ROOT user
+      file:
+          path: /root/.kube/
+          state: directory        
+
+    - name: Copy kube config to ROOT home .kube dir 
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest:  /root/.kube/config
+        remote_src: yes
+        owner: root
+        group: root
+        mode: 0660
+
+    - name: Generate join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Copy join command for {{ k8s_cluster_name }} cluster to local file
+      local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./{{ k8s_cluster_name }}-join-command"
+
+    - name: Enable kubectl autocompletion
+      become: yes
+      shell: kubectl completion bash > /etc/bash_completion.d/kubectl
+
+    - name: Install Python PIP
+      become: yes
+      shell: apt install -y python-pip
+
+    - name: Upgrade Setup Tools
+      become: yes
+      shell: pip install -U pip setuptools --user python 
+
+    - name: Install openshift
+      become: yes
+      shell: pip install openshift
+
+    - name: Install PyYAML
+      become: yes
+      shell: pip install PyYAML
+
+    - name: Install Docker
+      become: yes
+      shell: pip install docker

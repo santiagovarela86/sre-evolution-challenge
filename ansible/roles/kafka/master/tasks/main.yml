@@ -1,0 +1,396 @@
+- name: Create the Kafka Cluster Namespace
+  k8s:
+    kind: Namespace
+    api_version: v1
+    name: kafka-cluster
+    state: present
+
+- name: Create the Zookeeper Headless Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: zookeeper-headless
+        namespace: kafka-cluster
+        labels:
+          app: zookeeper
+      spec:
+        ports:
+        - name: server
+          port: 2888
+          protocol: TCP
+        - name: leader-election
+          port: 3888
+          protocol: TCP
+        clusterIP: None
+        selector:
+          app: zookeeper
+    state: present
+
+- name: Create the Zookeeper Client Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: zookeeper-service
+        namespace: kafka-cluster
+        labels:
+          app: zookeeper
+      spec:
+        ports:
+        - name: client
+          port: 2181
+          protocol: TCP
+        - name: jmx
+          port: 7070
+          protocol: TCP
+        selector:
+          app: zookeeper
+    state: present
+
+- name: Create the Kafka Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: kafka-service
+        namespace: kafka-cluster
+      spec:
+        ports:
+        - name: kafka-port
+          port: 9092
+          protocol: TCP
+        - name: kafka-jmx
+          port: 7070
+          protocol: TCP
+        selector:
+          app: kafka
+    state: present
+
+- name: Build Kafka Broker JMX Image
+  docker_image: 
+    name: "{{ k8s_master_public_ip }}:30500/kafka-jmx-image" 
+    tag: v0.1
+    source: build
+    force_source: yes
+    push: yes
+    build:
+      path: "/{{ k8s_master_admin_user }}/kafka-jmx"
+      pull: yes
+
+- name: Build Zookeper JMX Image
+  docker_image: 
+    name: "{{ k8s_master_public_ip }}:30500/zookeeper-jmx-image" 
+    tag: v0.1
+    source: build
+    force_source: yes
+    push: yes
+    build:
+      path: "/{{ k8s_master_admin_user }}/zookeeper-jmx"
+      pull: yes
+
+- name: Create the Zookeeper Stateful Set
+  k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: zookeeper
+        namespace: kafka-cluster
+      spec:
+        selector:
+          matchLabels:
+            app: zookeeper
+        serviceName: zookeeper-headless
+        replicas: "{{ zookeeper_num }}"
+        updateStrategy:
+          type: RollingUpdate
+        podManagementPolicy: OrderedReady
+        template:
+          metadata:
+            labels:
+              app: zookeeper
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: "app"
+                          operator: In
+                          values:
+                          - zookeeper
+                    topologyKey: "kubernetes.io/hostname"
+            containers:
+            - name: kubernetes-zookeeper
+              image: "{{ k8s_master_public_ip }}:30500/zookeeper-jmx-image:v0.1"
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  memory: "1Gi"
+                  cpu: "0.5"
+              ports:
+              - name: client
+                containerPort: 2181
+                protocol: TCP
+              - name: server
+                containerPort: 2888
+                protocol: TCP
+              - name: leader-election
+                containerPort: 3888
+                protocol: TCP
+              - name: jmx
+                containerPort: 7070
+                protocol: TCP
+              command:
+              - sh
+              - -c
+              - "start-zookeeper \
+                --servers={{ zookeeper_num }} \
+                --data_dir=/var/lib/zookeeper/data \
+                --data_log_dir=/var/lib/zookeeper/data/log \
+                --conf_dir=/opt/zookeeper/conf \
+                --client_port=2181 \
+                --election_port=3888 \
+                --server_port=2888 \
+                --tick_time=2000 \
+                --init_limit=10 \
+                --sync_limit=5 \
+                --heap=512M \
+                --max_client_cnxns=60 \
+                --snap_retain_count=3 \
+                --purge_interval=12 \
+                --max_session_timeout=40000 \
+                --min_session_timeout=4000 \
+                --log_level=INFO"
+              env: 
+              - name: SERVER_JVMFLAGS
+                value: -Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=127.0.0.1 -Dcom.sun.management.jmxremote.rmi.port=1099 -javaagent:/opt/zookeeper/lib/jmx_prometheus_javaagent.jar=7070:/opt/zookeeper/lib/zookeeper-jmx-config.yml
+              readinessProbe:
+                exec:
+                  command:
+                  - sh
+                  - -c
+                  - "zookeeper-ready 2181"
+                initialDelaySeconds: 10
+                timeoutSeconds: 5
+              livenessProbe:
+                exec:
+                  command:
+                  - sh
+                  - -c
+                  - "zookeeper-ready 2181"
+                initialDelaySeconds: 10
+                timeoutSeconds: 5
+              volumeMounts:
+              - name: datadir
+                mountPath: /var/lib/zookeeper
+            securityContext:
+              runAsUser: 1000
+              fsGroup: 1000
+        volumeClaimTemplates:
+        - metadata:
+            name: datadir
+          spec:
+            accessModes: [ "ReadWriteOnce" ]
+            storageClassName: "local-storage"
+            resources:
+              requests:
+                storage: "{{ zookeeper_volume_size }}"
+    state: present
+
+- name: Create the Kafka Broker Stateful Set
+  k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: kafka-broker
+        namespace: kafka-cluster
+      spec:
+        selector:
+          matchLabels:
+            app: kafka
+        serviceName: kafka-service
+        replicas: "{{ kafka_broker_num }}"
+        updateStrategy:
+          type: RollingUpdate
+        podManagementPolicy: OrderedReady
+        template:
+          metadata:
+            labels:
+              app: kafka
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchExpressions:
+                        - key: "app"
+                          operator: In
+                          values:
+                          - kafka
+                    topologyKey: "kubernetes.io/hostname"
+            containers:
+            - name: kafka
+              image: "{{ k8s_master_public_ip }}:30500/kafka-jmx-image:v0.1" 
+              imagePullPolicy: Always
+              ports:
+              - name: kafka
+                containerPort: 9092
+                protocol: TCP
+              - name: jmx
+                containerPort: 7070
+                protocol: TCP
+              env:
+              - name: BROKER_ID_COMMAND
+                value: hostname | awk -F'-' '{print $3}'
+              - name: KAFKA_ZOOKEEPER_CONNECT
+                value: zookeeper-service:2181
+              - name: KAFKA_LISTENERS
+                value: INTERNAL://:9094, EXTERNAL://:9092
+              - name: KAFKA_ADVERTISED_LISTENERS
+                value: INTERNAL://:9094, EXTERNAL://:9092
+              - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+                value: INTERNAL:PLAINTEXT, EXTERNAL:PLAINTEXT
+              - name: KAFKA_INTER_BROKER_LISTENER_NAME
+                value: INTERNAL
+              - name: KAFKA_CREATE_TOPICS
+                value: "{{ kafka_topics }}"
+              - name: KAFKA_JMX_OPTS
+                value: "-Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=127.0.0.1 -Dcom.sun.management.jmxremote.rmi.port=1099"
+              - name: JMX_PORT
+                value: "1099"
+              - name: EXTRA_ARGS
+                value: -javaagent:/opt/kafka/libs/jmx_prometheus_javaagent.jar=7070:/opt/kafka/libs/kafka-jmx-config.yml
+              - name: KAFKA_LOG_DIRS
+                value: "/kafka/kafka-logs"
+              - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+                value: "{{ kafka_broker_num | string }}"
+              - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+                value: "{{ kafka_broker_num | string }}"
+              volumeMounts:
+              - name: datadir
+                mountPath: "/kafka/kafka-logs"
+        volumeClaimTemplates:
+        - metadata:
+            name: datadir
+          spec:
+            accessModes: [ "ReadWriteOnce" ]
+            storageClassName: "local-storage"
+            resources:
+              requests:
+                storage: "{{ kafka_volume_size }}"
+    state: present
+
+- name: Create the Zookeeper Pod Disruption Budget
+  k8s:
+    definition: 
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: zookeeper-poddisruptionbudget
+        namespace: kafka-cluster
+      spec:
+        selector:
+          matchLabels:
+            app: zookeeper
+        maxUnavailable: 1
+    state: present
+
+- name: Create the Kafka Pod Disruption Budget
+  k8s:
+    definition: 
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: kafka-poddisruptionbudget
+        namespace: kafka-cluster
+      spec:
+        selector:
+          matchLabels:
+            app: kafka
+        maxUnavailable: 1
+    state: present
+
+- name: Generate Zookeeper Persistent Volumes Sequence
+  set_fact:
+    zookeeper_pv_sequence: "{{ range(0, zookeeper_num) | list }}"
+
+- name: Generate Kafka Persistent Volumes Sequence
+  set_fact:
+    kafka_pv_sequence: "{{ range(0, kafka_broker_num) | list }}"
+
+- name: Create the Zookeeper Persistent Volumes
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: "pv-zookeeper-{{ item }}"
+        namespace: kafka-cluster
+      spec:
+        capacity:
+          storage: "{{ zookeeper_volume_size }}"
+        storageClassName: local-storage
+        accessModes:
+          - ReadWriteOnce
+        claimRef:
+          namespace: kafka-cluster
+          name: "datadir-zookeeper-{{ item }}"
+        local:
+          path: "{{ zookeeper_mount_path }}"
+        nodeAffinity:
+          required:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - "{{ worker_prefix }}{{ item + 1 }}"
+    state: present
+  loop: "{{ zookeeper_pv_sequence }}"
+
+- name: Create the Kafka Persistent Volumes
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: "pv-kafka-{{ item }}"
+        namespace: kafka-cluster
+      spec:
+        capacity:
+          storage: "{{ kafka_volume_size }}"
+        storageClassName: local-storage
+        accessModes:
+          - ReadWriteOnce
+        claimRef:
+          namespace: kafka-cluster
+          name: "datadir-kafka-broker-{{ item }}"
+        local:
+          path: "{{ kafka_mount_path }}"
+        nodeAffinity:
+          required:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - "{{ worker_prefix }}{{ item + 1 }}"
+    state: present
+  loop: "{{ kafka_pv_sequence }}"
+
+- name: Create the Local Storage Class provider
+  k8s:
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: local-storage
+      provisioner: kubernetes.io/no-provisioner
+      volumeBindingMode: WaitForFirstConsumer
+    state: present

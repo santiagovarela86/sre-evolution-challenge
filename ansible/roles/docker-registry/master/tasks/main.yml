@@ -1,0 +1,68 @@
+- name: Create the Docker-Registry Namespace
+  k8s:
+    kind: Namespace
+    api_version: v1
+    name: docker-registry
+    state: present
+
+- name: Create the Docker-Registry Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: docker-registry
+        namespace: docker-registry
+      spec:
+        selector:
+          app: docker-registry
+        ports:
+        - name: docker-registry
+          nodePort: 30500
+          protocol: TCP
+          port: 5000
+        type: NodePort
+    state: present
+
+- name: Create the Docker-Registry Deployment
+  k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: docker-registry
+        namespace: docker-registry
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+              app: docker-registry
+        template:
+          metadata:
+            labels:
+              app: docker-registry
+          spec:
+            containers:
+            - name: registry
+              image: registry:2
+              imagePullPolicy: Always
+            ports:
+              - name: registry
+                containerPort: 5000
+                protocol: TCP
+            env:
+              - name: REGISTRY_HTTP_ADDR
+                value: 0.0.0.0:5000
+            tolerations: # LET IT RUN IN THE MASTER NODE...
+            - key: "node-role.kubernetes.io/master"
+              operator: "Exists"
+              effect: NoSchedule
+    state: present
+
+- name: Wait for Docker-Registry to be ready
+  wait_for:
+    port: 30500
+    host: "{{ k8s_master_node_name }}"
+    connect_timeout: 5
+    delay: 5
+    timeout: 300

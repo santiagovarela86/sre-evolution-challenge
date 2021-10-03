@@ -1,0 +1,65 @@
+- name: Create the Applications Namespace
+  k8s:
+    kind: Namespace
+    api_version: v1
+    name: applications
+    state: present
+
+- name: Build Producer Image
+  docker_image: 
+    name: "{{ k8s_master_public_ip }}:30500/producer-image" 
+    tag: v0.1
+    source: build
+    force_source: yes
+    push: yes
+    build:
+      path: "/{{ k8s_master_admin_user }}/producer"
+      pull: yes
+
+- name: Create the Producer Metrics Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: producer-metrics
+        namespace: applications
+        labels:
+          app: producer-metrics
+      spec:
+        ports:
+        - name: metrics
+          port: 8000
+          protocol: TCP
+        selector:
+          app: producer
+    state: present
+
+- name: Create the Producer Deployment
+  k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: producer
+        namespace: applications
+      spec:
+        replicas: 1 
+        selector:
+          matchLabels:
+              app: producer
+        template:
+          metadata:
+            labels:
+              app: producer
+          spec:
+            containers:
+            - name: producer
+              image: "{{ k8s_master_public_ip }}:30500/producer-image:v0.1" 
+              imagePullPolicy: Always
+              env:
+              - name: KAFKA_SERVICE
+                value: kafka-service.kafka-cluster.svc.cluster.local
+              - name: KAFKA_PORT
+                value: "9092"
+    state: present

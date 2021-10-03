@@ -1,0 +1,98 @@
+- name: Check if K8S Worker initialization has been completed # Kind of... 
+  command: cat /home/{{ k8s_node_admin_user }}/k8s-cluster-join-command
+  register: k8s_worker_init
+  ignore_errors: yes
+
+- name: Check if it is K8S Worker Number 1
+  shell: hostname | grep -i {{ worker_prefix }}1
+  register: is_k8s_worker_number_1
+  ignore_errors: yes
+
+- name: K8S Worker initialization
+  when: k8s_worker_init.stderr.find('No such file or directory') != -1 # If K8S Worker initialization has NOT been completed
+  block:
+    - name: Copy the join command to {{ k8s_cluster_name }} cluster
+      copy: 
+        src: "./{{ k8s_cluster_name }}-join-command" 
+        dest: /home/{{ k8s_node_admin_user }}/{{ k8s_cluster_name }}-join-command
+        owner: "{{ k8s_node_admin_user }}"
+        group: "{{ k8s_node_admin_group }}"
+        mode: 0760
+  
+    - name: Join the node to cluster {{ k8s_cluster_name }}
+      command: sh /home/{{ k8s_node_admin_user }}/{{ k8s_cluster_name }}-join-command
+
+- name: Generate Zookeeper Volume
+  parted:
+    device: /dev/sdc
+    number: 1
+    state: present
+
+- name: Generate Kafka Volume
+  parted:
+    device: /dev/sdd
+    number: 1
+    state: present
+
+- name: Generate Zookeeper FileSystem
+  filesystem:
+    dev: /dev/sdc1
+    fstype: xfs
+
+- name: Generate Kafka FileSystem
+  filesystem:
+    dev: /dev/sdd1
+    fstype: xfs
+
+- name: Mount Zookeeper Volume
+  mount:
+    path: "{{ zookeeper_mount_path }}"
+    src: /dev/sdc1
+    fstype: xfs
+    state: mounted
+
+- name: Mount Kafka Volume
+  mount:
+    path: "{{ kafka_mount_path }}"
+    src: /dev/sdd1
+    fstype: xfs
+    state: mounted
+
+- name: Generate and Mount Grafana and Prometheus Volumes and FileSystemns
+  when: is_k8s_worker_number_1.stdout != "" # If it is K8S Worker Number 1
+  block:
+    - name: Generate Grafana Volume
+      parted:
+        device: /dev/sde
+        number: 1
+        state: present
+
+    - name: Generate Prometheus Volume
+      parted:
+        device: /dev/sdf
+        number: 1
+        state: present
+
+    - name: Generate Grafana FileSystem
+      filesystem:
+        dev: /dev/sde1
+        fstype: xfs
+
+    - name: Generate Prometheus FileSystem
+      filesystem:
+        dev: /dev/sdf1
+        fstype: xfs
+
+    - name: Mount Grafana Volume
+      mount:
+        path: "{{ grafana_mount_path }}"
+        src: /dev/sde1
+        fstype: xfs
+        state: mounted
+
+    - name: Mount Prometheus Volume
+      mount:
+        path: "{{ prometheus_mount_path }}"
+        src: /dev/sdf1
+        fstype: xfs
+        state: mounted

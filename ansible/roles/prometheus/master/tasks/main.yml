@@ -1,0 +1,205 @@
+- name: Create the Monitoring Namespace
+  k8s:
+    kind: Namespace
+    api_version: v1
+    name: monitoring
+    state: present
+
+- name: Create the Persistent Volume Claim
+  k8s: 
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: prometheus-pvc
+        namespace: monitoring
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: "{{ prometheus_volume_size }}"
+        storageClassName: "local-storage"
+    state: present
+
+- name: Create the Prometheus Cluster Role
+  k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: prometheus
+      rules:
+      - apiGroups: [""]
+        resources:
+        - nodes
+        - services
+        - endpoints
+        - pods
+        verbs: ["get", "list", "watch"]
+      - apiGroups: [""]
+        resources:
+        - configmaps
+        verbs: ["get"]
+      - nonResourceURLs: ["/metrics"]
+        verbs: ["get"]
+    state: present
+
+- name: Create the Prometheus Service Account
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: prometheus
+        namespace: monitoring
+    state: present
+
+- name: Create the Prometheus Cluster Role Binding
+  k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: prometheus
+        namespace: monitoring
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: prometheus
+      subjects:
+      - kind: ServiceAccount
+        name: prometheus
+        namespace: monitoring
+    state: present
+
+- name: Create the Prometheus Config Map
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: prometheus-config
+        namespace: monitoring
+      data:
+        prometheus-configmap.yml: |
+          global:
+            scrape_interval: 1m
+            scrape_timeout: 1m
+          scrape_configs:
+          - job_name: "kafka-jmx"
+            static_configs:
+            - targets:
+              - "kafka-service.kafka-cluster.svc.cluster.local:7070"
+          - job_name: "zookeeper-jmx"
+            static_configs:
+            - targets:
+              - "zookeeper-service.kafka-cluster.svc.cluster.local:7070"
+          - job_name: "consumer"
+            static_configs:
+            - targets:
+              - "consumer-metrics.applications.svc.cluster.local:8000"
+          - job_name: "producer"
+            static_configs:
+            - targets:
+              - "producer-metrics.applications.svc.cluster.local:8000"
+    state: present
+
+- name: Create the Prometheus Deployment
+  k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: prometheus
+        namespace: monitoring
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: prometheus
+        template:
+          metadata:
+            labels:
+              app: prometheus
+          spec:
+            containers:
+            - name: prometheus
+              image: prom/prometheus:v2.30.1
+              imagePullPolicy: Always
+              args:
+              - '--storage.tsdb.path=/data'
+              - '--config.file=/etc/prometheus/prometheus.yml'
+              - '--storage.tsdb.retention.time=31d'
+              volumeMounts:
+              - name: config-volume
+                mountPath: /etc/prometheus/prometheus.yml
+                subPath: prometheus-configmap.yml
+              - name: prometheus-pv
+                mountPath: /data
+              ports:
+              - name: prometheus
+                containerPort: 9090
+                protocol: TCP
+            securityContext:
+              fsGroup: 65534
+              runAsGroup: 65534
+              runAsNonRoot: true
+              runAsUser: 65534  
+            volumes:
+            - name: config-volume
+              configMap:
+                name: prometheus-config
+            - name: prometheus-pv
+              persistentVolumeClaim:
+                claimName: prometheus-pvc
+            serviceAccountName: prometheus
+    state: present
+
+- name: Create the Persistent Volume
+  k8s:
+    definition: 
+      kind: PersistentVolume
+      apiVersion: v1
+      metadata:
+        name: pv-prometheus
+        namespace: monitoring
+      spec:
+        capacity:
+          storage: "{{ prometheus_volume_size }}"
+        storageClassName: local-storage
+        accessModes:
+          - ReadWriteOnce
+        claimRef:
+          namespace: monitoring
+          name: prometheus-pvc
+        local:
+          path: "{{ prometheus_mount_path }}"
+        nodeAffinity:
+          required:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - "{{ worker_prefix }}1" 
+    state: present
+
+- name: Create the Prometheus Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: prometheus-service
+        namespace: monitoring
+      spec:
+        selector:
+          app: prometheus
+        ports:
+        - name: promui
+          nodePort: "{{ prometheus_port }}"
+          protocol: TCP
+          port: 9090
+        type: NodePort
+    state: present

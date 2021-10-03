@@ -1,0 +1,46 @@
+- name: Check if K8S Node initialization has been completed # Kind of... 
+  become: yes
+  command: cat /etc/docker/daemon.json
+  register: k8s_node_init
+  ignore_errors: yes
+
+- name: K8S Node initialization
+  when: k8s_node_init.stdout.find('native.cgroupdriver=systemd') == -1 # If K8S Node initialization has NOT been completed
+  block:
+    - name: Remove current swaps from fstab
+      lineinfile:
+        dest: /etc/fstab
+        regexp: '^/[\S]+\s+none\s+swap '
+        state: absent
+
+    - name: Disable swap
+      command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      
+    - name: set docker cgroup driver to systemd and Allow our insecure Docker Registry
+      copy:
+        content: "{\"exec-opts\": [\"native.cgroupdriver=systemd\"], \"insecure-registries\": [\"{{ k8s_master_public_ip }}:30500\"]}"
+        dest: "/etc/docker/daemon.json"
+
+    - name: restart docker
+      become: yes
+      command: systemctl restart docker  
+
+    - name: Add k8s_common_admin_user user to docker group
+      user: 
+        name: "{{ k8s_common_admin_user }}"
+        group: docker
+
+    - name: Check that docker service is started
+      service: 
+            name: docker 
+            state: started
+
+    - name: Configure node-ip "{{ k8s_node_public_ip }} at kubelet
+      lineinfile:
+        path: '/etc/systemd/system/kubelet.service.d/10-kubeadm.conf'
+        line: 'Environment="KUBELET_EXTRA_ARGS=--node-ip={{ k8s_node_public_ip }}"'
+        regexp: 'KUBELET_EXTRA_ARGS='
+        insertafter: '\[Service\]'
+        state: present
+      notify: restart kubelet

@@ -1,0 +1,66 @@
+- name: Create the Applications Namespace
+  k8s:
+    kind: Namespace
+    api_version: v1
+    name: applications
+    state: present
+
+- name: Build Consumer Image
+  docker_image: 
+    name: "{{ k8s_master_public_ip }}:30500/consumer-image" 
+    tag: v0.1
+    source: build
+    force_source: yes
+    push: yes
+    build:
+      path: "/{{ k8s_master_admin_user }}/consumer"
+      pull: yes
+
+- name: Create the Consumer Metrics Service
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: consumer-metrics
+        namespace: applications
+        labels:
+          app: consumer-metrics
+      spec:
+        ports:
+        - name: metrics
+          port: 8000
+          protocol: TCP
+        selector:
+          app: consumer
+    state: present
+
+- name: Create the Consumer Deployment
+  k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: consumer
+        namespace: applications
+      spec:
+        replicas: 1 
+        selector:
+          matchLabels:
+              app: consumer
+        template:
+          metadata:
+            labels:
+              app: consumer
+          spec:
+            containers:
+            - name: consumer
+              image: "{{ k8s_master_public_ip }}:30500/consumer-image:v0.1"
+              imagePullPolicy: Always
+              env:
+              - name: KAFKA_SERVICE
+                value: kafka-service.kafka-cluster.svc.cluster.local
+              - name: KAFKA_PORT
+                value: "9092"
+    state: present
+

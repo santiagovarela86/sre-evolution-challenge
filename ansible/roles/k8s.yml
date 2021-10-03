@@ -1,0 +1,16 @@
+- hosts: k8s-master-*
+  become: yes
+  roles:
+    - { role: k8s/master }
+    - { role: flannel/master }
+    - { role: docker-registry/master }
+    - { role: kafka/master }
+    - { role: prometheus/master }
+    - { role: grafana/master }
+    - { role: consumer/master }
+    - { role: producer/master }
+
+- hosts: k8s-worker-*
+  become: yes
+  roles:
+    - { role: k8s/worker }
